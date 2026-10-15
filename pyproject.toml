@@ -1,6 +1,6 @@
 [project]
 name = "instagram-client"
-version = "0.1.0"
+version = "0.1.1"
 description = "Instagram logged-out client: profiles, posts and oEmbed (public data)"
 readme = "README.md"
 authors = [
