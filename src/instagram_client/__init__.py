@@ -1,7 +1,3 @@
-from instagram_client.ig_scraper import (
-    GateError,
-    InstagramScraper,
-    LoginRequired,
-)
+from instagram_client.ig_scraper import InstagramScraper
 
-__all__ = ["InstagramScraper", "GateError", "LoginRequired"]
+__all__ = ["InstagramScraper"]

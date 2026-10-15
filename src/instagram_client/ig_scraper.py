@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Instagram scraper (logged-out) — dibangun dari hasil reverse engineering 14 Okt 2026.
+"""Instagram client (logged-out) — hasil reverse engineering 14 Okt 2026.
+
+Semua method MENGEMBALIKAN JSON MENTAH (raw response) dari endpoint, tanpa
+normalisasi/apapun. Error tingkat API (gate, login_required, graphql errors)
+ikut dikirim apa adanya sebagai isi response.
 
 Endpoint yang dipakai:
   1. GET  i.instagram.com/api/v1/users/web_profile_info/   (mobile UA + mobile app id)
@@ -12,15 +16,21 @@ Endpoint yang dipakai:
 
 Hasil reverse engineering lengkap (endpoint, doc_id, header, risiko) ada di repo
 `instagram-re` (NOTES.md).
+
+Pakai:
+    instagram-client profile <username>
+    instagram-client post <shortcode>
+    instagram-client by-id <user_id>
+    instagram-client oembed <url-post>
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import random
 import re
 import time
-from typing import Any
 
 import httpx
 
@@ -45,17 +55,9 @@ PV_SHORTD = ("__relay_internal__pv__PolarisShortDramaEnabledrelayprovider", Fals
 PV_MULTIC = ("__relay_internal__pv__PolarisMultiCaptionCarouselEnabledrelayprovider", False)
 
 
-class GateError(RuntimeError):
-    """401 'Please wait a few minutes...' — rate-limit/rollout gate."""
-
-
-class LoginRequired(RuntimeError):
-    """Endpoint menjawab bahwa data hanya untuk sesi login."""
-
-
 class InstagramScraper:
     def __init__(self, min_interval: float = 6.0, timeout: float = 20.0,
-                 max_retries: int = 4):
+                 max_retries: int = 3):
         self.min_interval = min_interval
         self.timeout = timeout
         self.max_retries = max_retries
@@ -93,17 +95,23 @@ class InstagramScraper:
             or b'"igweb_rollout":true' in resp.content
 
     @staticmethod
-    def _is_login_required(payload: dict) -> bool:
-        return payload.get("message") in ("login_required",) or \
-            (payload.get("status") == "fail" and payload.get("error_type") == "login_required")
+    def _raw(resp: httpx.Response) -> dict:
+        """Parse body apa adanya; hanya prefix for (;;); dilepas supaya valid
+        JSON. Non-JSON dibungkus {"__raw__": ...} supaya tetap terbaca."""
+        text = resp.text
+        if text.startswith("for (;;);"):
+            text = text[len("for (;;);"):]
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return {"__raw__": text, "__http_status__": resp.status_code}
 
     def _bootstrap(self) -> None:
-        """Ambil cookie (csrftoken/mid) + token lsd dari landing page."""
+        """Ambil cookie (csrftoken/mid) + token lsd/hsi/rev dari landing page."""
         if self._bootstrapped:
             return
         self._throttle()
-        r = self.web.get("https://www.instagram.com/")
-        text = r.text
+        text = self.web.get("https://www.instagram.com/").text
         m = re.search(r'lsd":"([^"]+)"', text)
         self.lsd = m.group(1) if m else ""
         m = re.search(r'"hsi":"(\d+)"', text)
@@ -114,26 +122,26 @@ class InstagramScraper:
         self._bootstrapped = True
 
     def _request(self, sess: httpx.Client, method: str, url: str, **kw) -> httpx.Response:
-        last = None
+        """Kirim request; gate 401 / 429 (jendela rate limit) di-retry dulu.
+        Kalau tetap kena, response terakhir tetap DIKEMBALIKAN (raw)."""
+        resp: httpx.Response | None = None
         for attempt in range(self.max_retries):
             self._throttle()
             resp = sess.request(method, url, timeout=self.timeout, **kw)
-            # 429 (rate limit IP) dan gate "require_login" = masalah jendela waktu
             if self._is_gate(resp) or resp.status_code == 429:
-                last = resp
-                time.sleep(45 * (attempt + 1) + random.uniform(0, 15))
+                time.sleep(20 * (attempt + 1) + random.uniform(0, 8))
                 continue
             return resp
-        raise GateError(
-            f"gate/rate-limit bertahan setelah {self.max_retries} retry: {url} "
-            f"(HTTP {last.status_code if last is not None else '?'})")
+        assert resp is not None
+        return resp
 
     # --------------------------------------------------------------- graphql
     def _graphql(self, doc_id: str, variables: dict, friendly: str,
                  endpoint: str = GRAPHQL_DIST, root_field: str | None = None,
                  referer: str = "https://www.instagram.com/") -> dict:
-        """Kirim query persisten Relay. Retry untuk gate 401/429 dan envelope
-        error FB (for (;;);{"__ar":1,"error":...}) yang muncul saat kecepatan."""
+        """Kirim query persisten Relay, kembalikan payload mentah (termasuk
+        field errors/extensions bila ada). Envelope error FB yang sementara
+        (for (;;);{"__ar":1,...}) tetap di-retry sebelum menyerah."""
         self._bootstrap()
         form = {
             "doc_id": doc_id,
@@ -158,70 +166,25 @@ class InstagramScraper:
         if root_field:
             headers["X-Root-Field-Name"] = root_field
 
-        last_err = None
+        payload: dict = {}
         for attempt in range(self.max_retries):
             resp = self._request(self.web, "POST", endpoint, data=form, headers=headers)
-            text = resp.text
-            if text.startswith("for (;;);"):
-                text = text[len("for (;;);"):]
-            try:
-                payload = json.loads(text)
-            except json.JSONDecodeError:
-                last_err = f"respons bukan JSON ({resp.status_code}): {text[:200]}"
-                payload = None
-
-            if isinstance(payload, dict) and "__ar" in payload:
-                # envelope error FB (mis. 1357054) -> masalah jendela kecepatan
-                last_err = payload.get("errorDescription") or payload.get("error")
-                time.sleep(30 * (attempt + 1) + random.uniform(0, 10))
+            payload = self._raw(resp)
+            transient = "__ar" in payload or "__raw__" in payload
+            if transient and attempt < self.max_retries - 1:
+                time.sleep(20 * (attempt + 1) + random.uniform(0, 8))
                 continue
-            if payload is None:
-                time.sleep(30 * (attempt + 1))
-                continue
-
-            if payload.get("errors"):
-                code = payload["errors"][0].get("code")
-                msg = payload["errors"][0].get("message", "")
-                if code == 1675002 or "logged out" in msg:
-                    raise LoginRequired(f"{friendly}: {msg}")
-                if code == 1675012 or "missing_required_variable" in msg:
-                    raise RuntimeError(f"{friendly}: {msg} (code={code}) — cek variabel")
-                raise RuntimeError(f"{friendly}: {msg} (code={code})")
-            if "data" not in payload:
-                raise RuntimeError(f"{friendly}: struktur tak dikenal: {str(payload)[:200]}")
-            return payload["data"]
-
-        raise GateError(f"graphql gagal setelah {self.max_retries} retry: {last_err}")
+            break
+        return payload
 
     # ------------------------------------------------------------------ API
     def profile(self, username: str) -> dict:
-        """Profil publik + 12 post terbaru (tanpa login)."""
+        """Raw response web_profile_info (profil + 12 post terbaru)."""
         url = f"https://i.instagram.com/api/v1/users/web_profile_info/?username={username}"
-        resp = self._request(self.mobile, "GET", url)
-        payload = resp.json()
-        if self._is_login_required(payload) or payload.get("status") == "fail":
-            raise LoginRequired(f"web_profile_info menolak {username}: {payload.get('message')}")
-        user = payload["data"]["user"]
-        timeline = user.get("edge_owner_to_timeline_media") or {}
-        posts = [self._normalize_legacy_node(e.get("node", {})) for e in timeline.get("edges", [])]
-        return {
-            "id": user.get("id"),
-            "username": user.get("username"),
-            "full_name": user.get("full_name"),
-            "biography": user.get("biography"),
-            "external_url": user.get("external_url"),
-            "followers": (user.get("edge_followed_by") or {}).get("count"),
-            "following": (user.get("edge_follow") or {}).get("count"),
-            "posts_count": timeline.get("count"),
-            "is_private": user.get("is_private"),
-            "is_verified": user.get("is_verified"),
-            "is_business": user.get("is_business_account"),
-            "profile_pic_url": user.get("profile_pic_url_hd") or user.get("profile_pic_url"),
-            "recent_posts": posts,
-        }
+        return self._raw(self._request(self.mobile, "GET", url))
 
     def profile_by_id(self, user_id: str) -> dict:
-        """Profil publik by numeric id (GraphQL www)."""
+        """Raw response PolarisProfilePageContentQuery (profil by numeric id)."""
         variables = {
             "id": str(user_id),
             "enable_integrity_filters": False,
@@ -231,97 +194,49 @@ class InstagramScraper:
             "__relay_internal__pv__PolarisRepostsConsumptionEnabledrelayprovider": False,
             "__relay_internal__pv__PolarisShortDramaEnabledrelayprovider": False,
         }
-        data = self._graphql(DOC_PROFILE_PAGE, variables,
+        return self._graphql(DOC_PROFILE_PAGE, variables,
                              "PolarisProfilePageContentQuery", GRAPHQL_WWW,
-                             referer=f"https://www.instagram.com/p/instagram/")
-        user = data.get("user") or {}
-        return {
-            "id": user.get("pk"),
-            "username": user.get("username"),
-            "full_name": user.get("full_name"),
-            "biography": user.get("biography"),
-            "followers": user.get("follower_count"),
-            "posts_count": user.get("media_count"),
-            "is_private": user.get("is_private"),
-            "is_verified": user.get("is_verified"),
-            "bio_links": [b.get("url") for b in user.get("bio_links") or []],
-        }
+                             referer="https://www.instagram.com/")
 
     def post(self, shortcode: str) -> dict:
-        """Detail post/reel by shortcode (GraphQL distillery)."""
+        """Raw response PolarisPostRootQuery (detail post by shortcode)."""
         variables = {"shortcode": shortcode, PV_SHORTD[0]: PV_SHORTD[1],
                      PV_MULTIC[0]: PV_MULTIC[1]}
-        data = self._graphql(DOC_POST_ROOT, variables, "PolarisPostRootQuery",
+        return self._graphql(DOC_POST_ROOT, variables, "PolarisPostRootQuery",
                              GRAPHQL_DIST, root_field=ROOT_POST,
                              referer=f"https://www.instagram.com/p/{shortcode}/")
-        items = (data.get("xdt_api__v1__media__shortcode__web_info") or {}).get("items") or []
-        if not items:
-            raise RuntimeError(f"items kosong untuk {shortcode}: {str(data)[:300]}")
-        m = items[0]
-        owner = m.get("owner") or {}
-        caption = ((m.get("caption") or {}))
-        return {
-            "shortcode": m.get("code"),
-            "id": m.get("pk"),
-            "taken_at": m.get("taken_at"),
-            "media_type": m.get("media_type"),
-            "is_video": bool(m.get("video_versions")),
-            "caption": caption.get("text") if isinstance(caption, dict) else caption,
-            "like_count": m.get("like_count") or m.get("like_and_view_counts_disabled"),
-            "comment_count": m.get("comment_count"),
-            "view_count": m.get("view_count"),
-            "media_url": ((m.get("image_versions2") or {}).get("candidates") or [{}])[0].get("url"),
-            "video_url": ((m.get("video_versions") or [{}])[0]).get("url"),
-            "owner": {"id": owner.get("pk") or owner.get("id"),
-                      "username": owner.get("username"),
-                      "is_verified": owner.get("is_verified")},
-            "found": True,
-        }
 
     def oembed(self, post_url: str) -> dict:
-        """oEmbed resmi: caption, author, author_id (butuh URL post)."""
-        resp = self._request(self.web, "GET",
-                             "https://www.instagram.com/api/v1/oembed/",
-                             params={"url": post_url})
-        return resp.json()
-
-    # ------------------------------------------------------------ normalizers
-    @staticmethod
-    def _normalize_legacy_node(n: dict) -> dict:
-        caption = ((n.get("edge_media_to_caption") or {}).get("edges") or [{}])[0] \
-            .get("node", {}).get("text")
-        return {
-            "shortcode": n.get("shortcode"),
-            "id": n.get("id"),
-            "typename": n.get("__typename"),
-            "is_video": n.get("is_video"),
-            "taken_at": n.get("taken_at"),
-            "caption": caption,
-            "likes": (n.get("edge_media_preview_like") or {}).get("count"),
-            "comments": (n.get("edge_media_to_comment") or {}).get("count"),
-            "thumbnail": n.get("display_url"),
-            "dimensions": n.get("dimensions"),
-        }
+        """Raw response oEmbed resmi."""
+        return self._raw(self._request(
+            self.web, "GET", "https://www.instagram.com/api/v1/oembed/",
+            params={"url": post_url}))
 
 
-def _demo() -> None:
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        prog="instagram-client",
+        description="Instagram logged-out client — mencetak raw response JSON.")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("profile", help="profil + 12 post terbaru (by username)")
+    p.add_argument("username")
+    p = sub.add_parser("post", help="detail post (by shortcode)")
+    p.add_argument("shortcode")
+    p = sub.add_parser("by-id", help="profil (by numeric user id)")
+    p.add_argument("user_id")
+    p = sub.add_parser("oembed", help="oEmbed (by URL post)")
+    p.add_argument("url")
+
+    args = parser.parse_args(argv)
     s = InstagramScraper()
-    prof = s.profile("nasa")
-    print("PROFIL nasa:", {k: prof[k] for k in
-                           ("id", "username", "followers", "posts_count", "is_verified")})
-    if prof["recent_posts"]:
-        sc = prof["recent_posts"][0]["shortcode"]
-        print("POST terbaru:", sc)
-        detail = s.post(sc)
-        print("DETAIL:", {k: detail[k] for k in
-                          ("shortcode", "media_type", "caption", "comment_count") if k in detail})
-        print("OEMBED:", {k: v for k, v in
-                          s.oembed(f"https://www.instagram.com/p/{sc}/").items()
-                          if k in ("author_name", "author_id", "version")})
-
-
-def main() -> None:
-    _demo()
+    result = {
+        "profile": lambda: s.profile(args.username),
+        "post": lambda: s.post(args.shortcode),
+        "by-id": lambda: s.profile_by_id(args.user_id),
+        "oembed": lambda: s.oembed(args.url),
+    }[args.cmd]()
+    print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
