@@ -9,7 +9,7 @@ Dipakai oleh scraper [`crawlerfox/scraper-instagram`](https://github.com/crawler
 ## Install
 
 ```bash
-uv add "instagram-client @ git+ssh://git@github.com/scripthon/instagram-client.git@v0.1.0"
+uv add "instagram-client @ git+ssh://git@github.com/scripthon/instagram-client.git@v0.1.1"
 ```
 
 Memakai `httpx[http2]` — Instagram membalas `429` kosong untuk HTTP/1.1, jadi HTTP/2
