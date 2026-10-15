@@ -1,3 +1,5 @@
-from instagram_client.ig_scraper import InstagramScraper
+from .client import InstagramClient
+from .errors import ClientError, NotFoundError, StatusError
+from .transport import Transport
 
-__all__ = ["InstagramScraper"]
+__all__ = ["ClientError", "InstagramClient", "NotFoundError", "StatusError", "Transport"]

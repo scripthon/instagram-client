@@ -1,18 +1,24 @@
 [project]
 name = "instagram-client"
 version = "0.1.0"
-description = "Instagram logged-out client: profil, post, oembed (hasil reverse engineering instagram.com)"
+description = "Instagram logged-out client: profiles, posts and oEmbed (public data)"
 readme = "README.md"
 authors = [
     { name = "scripthon", email = "scripthon.build@gmail.com" }
 ]
 requires-python = ">=3.13"
 dependencies = [
-    "httpx[http2]>=0.28.1",
+    "httpx[http2,socks]>=0.28.1",
 ]
 
 [project.scripts]
-instagram-client = "instagram_client.ig_scraper:main"
+instagram-client = "instagram_client.__main__:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.7",
+]
 
 [build-system]
 requires = ["uv_build>=0.12.23,<0.13.0"]
