@@ -34,6 +34,14 @@ ROOT_POST = "xdt_api__v1__media__shortcode__web_info"
 
 PV_SHORT_DRAMA = "__relay_internal__pv__PolarisShortDramaEnabledrelayprovider"
 PV_MULTI_CAPTION = "__relay_internal__pv__PolarisMultiCaptionCarouselEnabledrelayprovider"
+# Provided variables the profile-page query requires (server checks presence,
+# not the value); omitting them fails with missing_required_variable_value.
+PV_PROFILE = {
+    "__relay_internal__pv__PolarisCannesGuardianExperienceEnabledrelayprovider": False,
+    "__relay_internal__pv__PolarisCASB976ProfileEnabledrelayprovider": False,
+    "__relay_internal__pv__PolarisWebSchoolsEnabledrelayprovider": False,
+    "__relay_internal__pv__PolarisRepostsConsumptionEnabledrelayprovider": False,
+}
 
 
 class InstagramClient:
@@ -136,7 +144,7 @@ class InstagramClient:
             "id": str(user_id),
             "enable_integrity_filters": False,
             PV_SHORT_DRAMA: False,
-            PV_MULTI_CAPTION: False,
+            **PV_PROFILE,
         }
         payload = self._graphql(
             DOC_PROFILE_PAGE,

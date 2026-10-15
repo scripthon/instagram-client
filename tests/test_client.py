@@ -75,12 +75,13 @@ class _FakeTransport:
         self.hsi = ""
         self.lsd = ""
         self.csrf = ""
+        self.last_form: dict = {}
 
     def _bootstrap(self) -> None:  # pragma: no cover - no-op
         pass
 
     def request(self, *args: object, **kwargs: object) -> None:
-        return None
+        self.last_form = kwargs.get("data", {})
 
     def parse(self, resp: object) -> object:
         return self.payload
@@ -99,3 +100,20 @@ def test_profile_by_id_unknown_is_not_found() -> None:
     client = InstagramClient(transport=_FakeTransport({"errors": [{"code": 1675030}]}))
     with pytest.raises(NotFoundError):
         client.profile_by_id("1")
+
+
+def test_profile_by_id_sends_required_provided_variables() -> None:
+    fake = _FakeTransport({"data": {"user": {"pk": "1"}}})
+    client = InstagramClient(transport=fake)
+    client.profile_by_id("1")
+    variables = json.loads(fake.last_form["variables"])
+    assert variables["id"] == "1"
+    # Instagram fails with missing_required_variable_value without these.
+    for key in (
+        "__relay_internal__pv__PolarisCannesGuardianExperienceEnabledrelayprovider",
+        "__relay_internal__pv__PolarisCASB976ProfileEnabledrelayprovider",
+        "__relay_internal__pv__PolarisWebSchoolsEnabledrelayprovider",
+        "__relay_internal__pv__PolarisRepostsConsumptionEnabledrelayprovider",
+        "__relay_internal__pv__PolarisShortDramaEnabledrelayprovider",
+    ):
+        assert key in variables
